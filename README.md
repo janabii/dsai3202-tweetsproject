@@ -29,3 +29,92 @@ Lastly, I then decided to just self assess the situation and while I was looking
 
 I then created a pipeline again and in Move and Transform -> copy data, I dragged copy data and I added raw_tweets as the source and tweets_parquet as the sink and enabled perserve hierarchy, the mapping was automatically correctly detected so all was left was to debug, and thankfully it ran successfully.
 
+## Databricks
+
+Now I have reached the databricks part where I will be starting off with the data cleaning and the feature prepping. Similar to the Data Factory I have decided not to create a new Databricks service as it would add more costs and be pointless as creating a new one would not add anything vital.
+
+### Data cleaning
+For the data cleaning part I started off by printing the schema which, like I mentioned earlier that it was able to detect the format had automatically made up the columns so they were detected as generic columns with the following names:
+
+root
+ |-- Column1: string (nullable = true)
+ |-- Column2: string (nullable = true)
+ |-- Column3: string (nullable = true)
+ |-- Column4: string (nullable = true)
+ |-- Column5: string (nullable = true)
+ |-- Column6: string (nullable = true)
+
+ So this clearly needed changing... by using .withColumnRename i changed the schemas to:
+
+ root
+ |-- polarity: string (nullable = true)
+ |-- id: string (nullable = true)
+ |-- date: string (nullable = true)
+ |-- query: string (nullable = true)
+ |-- user: string (nullable = true)
+ |-- text: string (nullable = true)
+
+After that I needed to perform data null checks to see if there are any and thankfully there were none.
+```python
+from pyspark.sql.functions import col, trim, length, count, when
+total_rows = tweets.count()
+
+null_polarity = tweets.filter(col("polarity").isNull()).count()
+null_id = tweets.filter(col("id").isNull()).count()
+null_date = tweets.filter(col("date").isNull()).count()
+null_query = tweets.filter(col("query").isNull()).count()
+null_user = tweets.filter(col("user").isNull()).count()
+null_text = tweets.filter(col("text").isNull()).count()
+
+empty_text = tweets.filter(
+    (col("text").isNull()) | (trim(col("text")) == "")
+).count()
+
+print(f"Total rows: {total_rows}")
+print(f"NULL polarity: {null_polarity}, NULL id: {null_id}, NULL date: {null_date}")
+print(f"NULL query: {null_query}, NULL user: {null_user}")
+print(f"NULL or empty text: {empty_text}")
+```
+-----------------------------------------------------------------------------
+I then felt the need to change a few things in the data as the query column was messy as it was showing this NO_QUERY, so I added this replacement where if there was no query it would change to null and if there was query it would stay as is.
+```python
+tweets = tweets.withColumn(
+    "query",
+    when(col("query") == "NO_QUERY", None).otherwise(col("query"))
+)
+```
+-----------------------------------------------------------------------------
+then, I changed the polarity column to a more suitable name of sentiment and to make it make more sense it would show 4 as positive and 0 for negative which is not a neat way for presenting the data so I changed it to 0 for negative and 1 for positive.
+```python
+tweets = tweets.withColumn(
+    "sentiment",
+    when(col("polarity") == "4", 1).otherwise(0)
+)
+```
+-----------------------------------------------------------------------------
+Then I performed data normalization by lowercasing, removing urls, mentions, hashtags, keeping letters and collpasing spaces.
+
+```python
+from pyspark.sql.functions import regexp_replace, lower, trim
+
+tweets = (
+    tweets
+    .withColumn("text", lower(trim(col("text"))))
+    .withColumn("text", regexp_replace(col("text"), r"http\S+", ""))
+    .withColumn("text", regexp_replace(col("text"), r"@\w+", "")) 
+    .withColumn("text", regexp_replace(col("text"), r"#[\w-]+", ""))
+    .withColumn("text", regexp_replace(col("text"), r"[^a-z\s]", ""))
+    .withColumn("text", regexp_replace(col("text"), r"\s+", " "))
+)
+```
+-----------------------------------------------------------------------------
+I then dropped tweets with length less than 5 as they would deem useless for my findings, and I fixed the datatype for the date column and also fixed its format to be a simpler dd-mm-yyyy. 
+After I completed all this the data was ready and clean to move onto feature prepping with my current schema being:
+
+root
+ |-- id: string (nullable = true)
+ |-- user: string (nullable = true)
+ |-- date: date (nullable = true)
+ |-- query: string (nullable = true)
+ |-- text: string (nullable = true)
+ |-- sentiment: integer (nullable = false)
