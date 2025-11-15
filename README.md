@@ -118,3 +118,116 @@ root
  |-- query: string (nullable = true)
  |-- text: string (nullable = true)
  |-- sentiment: integer (nullable = false)
+
+### Feature Prep
+Now that data cleaning is successful, I move onto feature prep. I decided on creating 3 aggregations as I thought they would be great additions to the current column list by giving more insight and deeper analysis:
+
+1. Daily Sentiment Count
+
+By grouping the date and breaking the tweets down from total, positive and negative to show us a positive ratio of the tweets on a certain date.
+```python
+daily_sentiment = (
+    tweets_clean.groupBy("date")
+    .agg(
+        count("*").alias("total_tweets"),
+        _sum(col("sentiment")).alias("positive_tweets")
+    )
+    .withColumn("negative_tweets", col("total_tweets") - col("positive_tweets"))
+    .withColumn("positive_ratio", round(col("positive_tweets") / col("total_tweets"), 3))
+)
+```
+-----------------------------------------------------------------------------
+2. Top Active Users
+Shows the most tweeting user by grouping the user and tweet count.
+```python
+top_users = (
+    tweets_clean.groupBy("user")
+    .agg(count("*").alias("user_tweet_count"))
+    .orderBy(col("user_tweet_count").desc())
+)
+```
+-----------------------------------------------------------------------------
+3. Tweet Length Stats
+By grouping the sentiment along with the tweet length's average, I get the average length depending on positive or negative sentiment.
+```python
+tweet_length_stats = (
+    tweets_clean.withColumn("tweet_length", length(col("text")))
+    .groupBy("sentiment")
+    .agg(
+        round(avg("tweet_length"), 2).alias("sentiment_avg_length"),
+        count("*").alias("sentiment_tweet_count")
+    )
+    .orderBy("sentiment")
+)
+```
+-----------------------------------------------------------------------------
+The schema I end up with when completing feature prep, which I save as features_v1 is:
+
+root
+ |-- sentiment: integer (nullable = true)
+ |-- user: string (nullable = true)
+ |-- date: date (nullable = true)
+ |-- id: string (nullable = true)
+ |-- query: string (nullable = true)
+ |-- text: string (nullable = true)
+ |-- total_tweets: long (nullable = true)
+ |-- positive_tweets: long (nullable = true)
+ |-- negative_tweets: long (nullable = true)
+ |-- positive_ratio: double (nullable = true)
+ |-- user_tweet_count: long (nullable = true)
+ |-- sentiment_avg_length: double (nullable = true)
+ |-- sentiment_tweet_count: long (nullable = true)
+
+ I then performed a few checks after making sure that the datatypes are correct to what they need to be:
+
+ ```python
+# 1. Basic structure & row count
+print("Row count:", features_v1.count())
+features_v1.printSchema()
+
+# 2. Null & empty value checks
+print("\nChecking for null values in each column:")
+null_counts = features_v1.select(
+    [_sum(col(c).isNull().cast("int")).alias(c) for c in features_v1.columns]
+)
+null_counts.show(truncate=False)
+
+# 3. Range & logical checks
+print("\nChecking value ranges and logical limits:")
+features_v1.select(
+    F.min("total_tweets").alias("min_total_tweets"),
+    F.max("total_tweets").alias("max_total_tweets"),
+    F.min("positive_ratio").alias("min_positive_ratio"),
+    F.max("positive_ratio").alias("max_positive_ratio"),
+    F.min("user_tweet_count").alias("min_user_tweet_count"),
+    F.max("user_tweet_count").alias("max_user_tweet_count"),
+    F.min("sentiment_avg_length").alias("min_avg_length"),
+    F.max("sentiment_avg_length").alias("max_avg_length")
+).show()
+
+# 4. Descriptive statistics overview
+print("\nDescriptive statistics overview:")
+features_v1.describe([
+    "total_tweets", 
+    "positive_tweets", 
+    "negative_tweets", 
+    "positive_ratio", 
+    "user_tweet_count", 
+    "sentiment_avg_length"
+]).show()
+
+# 5. Date sanity check
+print("\nChecking for any future-dated rows:")
+future_dates = features_v1.filter(F.col("date") > current_date())
+print("Future-dated rows:", future_dates.count())
+
+# 6. Duplicate check based on unique tweet ID
+print("\nChecking for duplicate tweet IDs:")
+dupes = features_v1.groupBy("id").count().filter("count > 1")
+print("Duplicate tweet_id count:", dupes.count())
+
+# 7. Sentiment distribution check
+print("\nSentiment distribution:")
+features_v1.groupBy("sentiment").count().orderBy("sentiment").show()
+```
+I ended up having no duplicates or nulls in my dataset, as well as the data being valid and not having illogical values which means I can now save my data in the curated (gold) container.
