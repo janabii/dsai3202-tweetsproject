@@ -1,4 +1,5 @@
 # DSAI 3202 Tweets Project
+## Ahmed Al Janabi | 60300347
 I will be trying to update this readme file with my findings and approaches since there are no specific guidelines of what we are asked to do.
 
 ## Data Ingestion 
