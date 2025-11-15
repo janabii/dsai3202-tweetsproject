@@ -34,6 +34,7 @@ I then created a pipeline again and in Move and Transform -> copy data, I dragge
 Now I have reached the databricks part where I will be starting off with the data cleaning and the feature prepping. Similar to the Data Factory I have decided not to create a new Databricks service as it would add more costs and be pointless as creating a new one would not add anything vital.
 
 ### Data cleaning
+#### NOTE: To view notebook head to data_cleaning branch -> notebooks/databricks-data_cleaning.ipynb
 For the data cleaning part I started off by printing the schema which, like I mentioned earlier that it was able to detect the format had automatically made up the columns so they were detected as generic columns with the following names:
 
 root
@@ -119,7 +120,8 @@ root
  |-- text: string (nullable = true)
  |-- sentiment: integer (nullable = false)
 
-### Feature Prep
+### Feature Prep (features_v1)
+#### NOTE: To view notebook head to features_v1 branch -> notebooks/databricks-feature_prep.ipynb
 Now that data cleaning is successful, I move onto feature prep. I decided on creating 3 aggregations as I thought they would be great additions to the current column list by giving more insight and deeper analysis:
 
 1. Daily Sentiment Count
@@ -231,3 +233,231 @@ print("\nSentiment distribution:")
 features_v1.groupBy("sentiment").count().orderBy("sentiment").show()
 ```
 I ended up having no duplicates or nulls in my dataset, as well as the data being valid and not having illogical values which means I can now save my data in the curated (gold) container.
+
+### Data Engineering (features_v2)
+#### NOTE: To view notebook head to features_v2 branch -> notebooks/databricks-feat_eng.ipynb & for code scripts/tweets_text_features.py
+For the final part of phase 1 of this project it was time to data engineer, I loaded the features_v1 and using the same logic basis from lab 4, which I came to find out is the common industry practice, will apply the 70/15 train, test and validation split to then engineer the data.
+
+```python
+train_df, val_df, test_df = df.randomSplit([0.7, 0.15, 0.15], seed=42)
+
+# save data
+v2_path = "abfss://lakehouse@project60300347.dfs.core.windows.net/curated/features_v2/"
+
+# putting each split as delta table
+train_df.write.format("delta").mode("overwrite").save(v2_path + "train/")
+val_df.write.format("delta").mode("overwrite").save(v2_path + "validation/")
+test_df.write.format("delta").mode("overwrite").save(v2_path + "test/")
+```
+
+-----------------------------------------------------------------------------
+The data splits were saved and then I ran them using the tweets_text_features.py which was originally inspired from lecture 5, to lab 4 to have spark changes and now it has reached the changes for this distinct tweets data which had some changes to make as the data is different to the goodreads data. 
+I used the bonus lexical diversity I added in lab 4, as it was a bonus I enjoyed and is also relevant to the tweets data, since words are important for understanding the user's sentiment, so I decided to keep it for this.
+
+```python
+import os
+from pyspark.sql import functions as F
+from pyspark.sql.types import FloatType, StructType, StructField
+from nltk.sentiment import SentimentIntensityAnalyzer
+from pyspark.ml.feature import Tokenizer, StopWordsRemover, HashingTF, IDF, IDFModel
+
+# -------------------------------
+# TEXT CLEANING
+# -------------------------------
+def clean_text(text):
+    if text is None:
+        return ""
+    import re, emoji
+    text = text.lower()
+    text = re.sub(r"http\S+|www\S+", " <URL> ", text)
+    text = re.sub(r"\b\d+\b", " <NUM> ", text)
+    text = emoji.replace_emoji(text, replace="<EMOJI>")
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+# -------------------------------
+# SENTIMENT ANALYZER
+# -------------------------------
+sia = SentimentIntensityAnalyzer()
+def get_sentiment(text):
+    if not text:
+        return (0.0, 0.0, 0.0, 0.0)
+    s = sia.polarity_scores(text)
+    return (s["pos"], s["neu"], s["neg"], s["compound"])
+
+# -------------------------------
+# LEXICAL DIVERSITY
+# -------------------------------
+def lexical_diversity(text):
+    if not text:
+        return 0.0
+    words = text.split()
+    return len(set(words)) / len(words) if len(words) > 0 else 0.0
+
+sentiment_schema = StructType([
+    StructField("pos", FloatType()),
+    StructField("neu", FloatType()),
+    StructField("neg", FloatType()),
+    StructField("compound", FloatType())
+])
+
+# -------------------------------
+# MAIN PROCESS FUNCTION
+# -------------------------------
+def process_split(split_name, fit=False):
+    print(f"\n--- Processing {split_name} split ---")
+
+    # Load data from features_v1 (train/val/test created earlier)
+    df = spark.read.format("delta").load(
+        f"abfss://lakehouse@project60300347.dfs.core.windows.net/curated/features_v2/{split_name}/"
+    )
+
+    # Text cleaning
+    from pyspark.sql.functions import udf
+    clean_text_udf = udf(clean_text)
+    df = df.withColumn("clean_text", clean_text_udf(F.col("text")))
+    df = df.filter(F.length(F.col("clean_text")) >= 10)
+
+    # Basic numeric text stats
+    df = df.withColumn("tweet_length_words", F.size(F.split(F.col("clean_text"), " ")))
+    df = df.withColumn("tweet_length_chars", F.length(F.col("clean_text")))
+
+    # Lexical sentiment features (VADER)
+    sentiment_udf = udf(get_sentiment, sentiment_schema)
+    df = df.withColumn("sent", sentiment_udf(F.col("clean_text")))
+    df = df.select("*",
+        F.col("sent.pos").alias("lex_sent_pos"),
+        F.col("sent.neu").alias("lex_sent_neu"),
+        F.col("sent.neg").alias("lex_sent_neg"),
+        F.col("sent.compound").alias("lex_sent_compound")
+    ).drop("sent")
+
+    # Lexical diversity
+    lexdiv_udf = F.udf(lexical_diversity, FloatType())
+    df = df.withColumn("lexical_diversity", lexdiv_udf(F.col("clean_text")))
+
+    # -------------------------------
+    # TF-IDF pipeline
+    # -------------------------------
+    tokenizer = Tokenizer(inputCol="clean_text", outputCol="words")
+    df = tokenizer.transform(df)
+
+    remover = StopWordsRemover(inputCol="words", outputCol="filtered_words")
+    df = remover.transform(df)
+
+    hashing_tf = HashingTF(inputCol="filtered_words", outputCol="raw_features", numFeatures=300)
+    df = hashing_tf.transform(df)
+
+    idf = IDF(inputCol="raw_features", outputCol="tfidf_features")
+    model_path = "/dbfs/tmp/tweets_idf_model"
+
+    if fit:
+        print("Fitting TF-IDF on training data...")
+        idf_model = idf.fit(df)
+        idf_model.write().overwrite().save(model_path)
+    else:
+        print("Loading existing TF-IDF model...")
+        idf_model = IDFModel.load(model_path)
+
+    df = idf_model.transform(df)
+
+    # -------------------------------
+    # Select final columns
+    # -------------------------------
+    final_cols = [
+        "id", "user", "date", "query", "clean_text", "sentiment",
+        "tweet_length_words", "tweet_length_chars",
+        "lex_sent_pos", "lex_sent_neu", "lex_sent_neg", "lex_sent_compound",
+        "lexical_diversity", "tfidf_features",
+        "total_tweets", "positive_tweets", "negative_tweets", "positive_ratio",
+        "user_tweet_count", "sentiment_avg_length", "sentiment_tweet_count"
+    ]
+
+    df_final = df.select(*[c for c in final_cols if c in df.columns])
+
+    # -------------------------------
+    # Write each split to its own Delta table
+    # -------------------------------
+    out_path = f"abfss://lakehouse@project60300347.dfs.core.windows.net/curated/features_v2_{split_name}/"
+    df_final.write.format("delta").mode("overwrite").save(out_path)
+    print(f"Saved {split_name} features to {out_path}")
+
+# -------------------------------
+# RUN PIPELINE FOR ALL SPLITS
+# -------------------------------
+process_split("train", fit=True)
+process_split("validation", fit=False)
+process_split("test", fit=False)
+```
+-----------------------------------------------------------------------------
+After the data concluded its run it was time to make the usual data checks to see if it is valid and verified before I conclude the features_v2 part.
+
+```python
+# numeric feature summary
+print("Numeric feature summary:")
+train_df.select(
+    "tweet_length_words",
+    "tweet_length_chars",
+    "lex_sent_compound",
+    "lexical_diversity"
+).summary().show()
+
+# check tf-idf feature count
+from pyspark.ml.linalg import VectorUDT
+from pyspark.sql.functions import udf
+
+tfidf_cols = [c for c in train_df.columns if c.startswith("tfidf_")]
+print("TF-IDF feature columns found:", tfidf_cols)
+
+if "tfidf_features" in train_df.columns:
+    size_udf = udf(lambda v: int(v.size), "int")
+    tfidf_size = train_df.select(size_udf("tfidf_features").alias("size")).limit(1).collect()[0]["size"]
+    print(f"TF-IDF feature count: {tfidf_size}")
+else:
+    print("No TF-IDF feature column found.")
+
+# null value check
+print("\nNull value check per column:")
+from pyspark.sql.functions import col, sum
+
+null_counts = train_df.select(
+    [sum(col(c).isNull().cast("int")).alias(c) for c in train_df.columns]
+)
+null_counts.show(truncate=False)
+
+# total row count
+print("\nTotal rows:", train_df.count())
+
+# schema preview
+print("\nSchema:")
+train_df.printSchema()
+```
+
+Thankfully all the data came back valid logically and with correct datatypes without the need for any curation, so it was all done for this data engineering part successfully.
+
+To end this part, I will now send the schema for features_v2, which is then going to be ready for what im guessing from lectures will be the analysis part.
+
+Schema:
+root
+ |-- id: string (nullable = true)
+ |-- user: string (nullable = true)
+ |-- date: date (nullable = true)
+ |-- query: string (nullable = true)
+ |-- clean_text: string (nullable = true)
+ |-- sentiment: integer (nullable = true)
+ |-- tweet_length_words: integer (nullable = true)
+ |-- tweet_length_chars: integer (nullable = true)
+ |-- lex_sent_pos: float (nullable = true)
+ |-- lex_sent_neu: float (nullable = true)
+ |-- lex_sent_neg: float (nullable = true)
+ |-- lex_sent_compound: float (nullable = true)
+ |-- lexical_diversity: float (nullable = true)
+ |-- tfidf_features: vector (nullable = true)
+ |-- total_tweets: long (nullable = true)
+ |-- positive_tweets: long (nullable = true)
+ |-- negative_tweets: long (nullable = true)
+ |-- positive_ratio: double (nullable = true)
+ |-- user_tweet_count: long (nullable = true)
+ |-- sentiment_avg_length: double (nullable = true)
+ |-- sentiment_tweet_count: long (nullable = true)
