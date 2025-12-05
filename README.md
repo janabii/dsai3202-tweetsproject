@@ -462,3 +462,183 @@ root
  |-- user_tweet_count: long (nullable = true)
  |-- sentiment_avg_length: double (nullable = true)
  |-- sentiment_tweet_count: long (nullable = true)
+
+ ### Data Modeling (PHASE 2)
+ After completing all the engineering work for features_v2, the dataset was finally ready for the analysis and modeling stage. At this point, I had a clean, validated, feature-rich dataset stored as Delta tables for train, validation, and test splits (70/15/15). With the data foundation solid, I proceeded to build and evaluate the machine learning models in Databricks.
+
+#### Loading the engineered data
+I began by loading the train, validation, and test splits from the curated (Gold) layer:
+
+Each split included:
+TF-IDF features, VADER sentiment scores (pos, neu, neg, compound),
+lexical diversity, tweet_length metrics, daily aggregated sentiment statistics,
+and user activity features.
+
+These columns captured a mixture of text semantics, behavioral patterns, and temporal sentiment indicators.
+
+#### Feature Assembly
+
+Before training any model, I combined all numeric features + TF-IDF vector into a single "features" column using Spark’s VectorAssembler.
+This created a unified input vector containing:
+
+TF-IDF 300-dimensional vector
+
+tweet_length_words
+
+tweet_length_chars
+
+lex_sent_pos
+
+lex_sent_neu
+
+lex_sent_neg
+
+lex_sent_compound
+
+lexical_diversity
+
+total_tweets
+
+positive_tweets
+
+negative_tweets
+
+positive_ratio
+
+user_tweet_count
+
+sentiment_avg_length
+
+sentiment_tweet_count
+
+After assembling and indexing the target variable, the dataset was ready for modeling.
+
+#### Logistic Regression 
+I started with Logistic Regression because TF-IDF vectors are naturally suited for linear models and it is widely used as a strong baseline for text classification.
+
+Training completed quickly and smoothly despite the dataset size (over 1M rows), which confirmed that the features were well-prepared and the data pipeline was efficient.
+
+Results (Validation Set)
+
+##### Accuracy: ~0.63
+
+##### F1 Score: ~0.62
+
+Observations
+
+Positive sentiment was the easiest class to detect because positive tweets often contain clear emotional words.
+
+Negative sentiment was the hardest due to subtle sarcasm and short expressions.
+
+The model performed surprisingly well given the complexity of tweet language and the large amount of noise in short, informal text.
+
+Logistic Regression established a reliable performance baseline for comparison with a more complex model.
+
+#### Gradient Boosted Trees (GBT)
+
+Gradient Boosted Trees (One-vs-Rest)
+
+Spark's native GBTClassifier only supports binary classification, so to handle the three sentiment classes (negative, neutral, positive), I used One-vs-Rest (OvR) on top of GBT.
+
+GBT trains more slowly and is non-linear, so I expected it to perform differently from LR.
+
+Results (Validation Set)
+
+##### Accuracy: ~0.61
+
+##### F1 Score: ~0.61
+
+Observations
+
+GBT slightly underperformed compared to Logistic Regression.
+
+This showed an important insight:
+The TF-IDF + engineered features create a feature space that is mostly linearly separable, which explains why LR performed better.
+
+OvR adds overhead because GBT trains a separate boosted model for each class.
+
+Still, GBT was valuable for comparison because it represents a more expressive model class.
+
+#### Model Comparison Plot
+To visually compare the two models, I generated a simple bar chart showing both accuracy and F1 score side-by-side. The plot clearly showed:
+
+Logistic Regression > GBT for both metrics
+
+The gap was small but consistent
+
+This reinforced the conclusion that LR is the more suitable model for this dataset and feature pipeline, to see all the plots it is in the docs -> figures folder.
+
+#### Model Evaluation applied to Test data
+
+After finalizing the comparison between Logistic Regression and GBT on the validation split, the final step was to evaluate the chosen model on the test dataset. Since Logistic Regression consistently performed slightly better and aligned naturally with the TF-IDF–based feature space, it was selected as the only model to be carried forward to the test stage.
+
+I applied the trained Logistic Regression model on the held-out test data, which had never been used during training or validation. The model produced the following results:
+
+##### Test Accuracy: ~0.627
+##### Test F1 Score: ~0.622
+
+These numbers closely mirror the validation metrics, confirming that:
+
+the model generalizes well to unseen tweets
+
+performance is stable across all three splits
+
+no overfitting or underfitting occurred
+
+This stability reinforces that the feature engineering and data preparation pipeline were effective.
+
+#### Why Only Logistic Regression Was Evaluated on the Test Set
+Although Gradient Boosted Trees were tested during validation for comparison, I intentionally did not extend GBT evaluation to the test split. This was a deliberate modeling decision for three reasons:
+
+###### 1. Performance Consideration
+Logistic Regression consistently outperformed GBT on the validation set, both in accuracy and F1. Since the goal of the test set is to assess the final model, evaluating multiple models on it is unnecessary.
+
+###### 2. Model Suitability
+The dataset relies heavily on TF-IDF sparse vectors, which linear models (like LR) are known to handle more efficiently and more effectively than tree-based methods. GBTs, in contrast, are not naturally suited to extremely high-dimensional sparse inputs.
+
+###### 3. Practicality
+GBT training and inference are significantly more computationally expensive. Given that LR already demonstrated superior validation performance, running additional GBT test evaluations would add cost without offering meaningful benefit.
+
+For these reasons, Logistic Regression was the most appropriate and efficient model to use for the final test-set evaluation.
+#### Final Decision 
+With stable performance across train, validation, and test splits—and with strong alignment to the structure of the engineered features, Logistic Regression is the recommended model for this sentiment analysis pipeline.
+
+### Deployment
+After finalizing the evaluation on the test split, I deployed the Logistic Regression model using Databricks MLflow. Unity Catalog requires every registered model to include both a signature and an input example, so I generated them directly from the engineered test data. I then logged the model along with the test metrics and registered it under the name tweet_sentiment_lr.
+
+```python
+from mlflow.models.signature import ModelSignature
+from mlflow.types import TensorSpec, Schema
+
+# model signature
+input_schema = Schema([TensorSpec("float32", (-1,))])
+output_schema = Schema([TensorSpec("float32", (1,))])
+signature = ModelSignature(inputs=input_schema, outputs=output_schema)
+
+# input example
+example_row = test2.select("features").limit(1).toPandas()
+input_example = {"features": example_row["features"][0].toArray()}
+
+import mlflow
+import mlflow.spark
+
+model_name = "tweet_sentiment_lr"
+
+with mlflow.start_run(run_name="LR_Final_Test_Model"):
+
+    mlflow.log_metric("test_accuracy", acc)
+    mlflow.log_metric("test_f1", f1)
+
+    mlflow.spark.log_model(
+        lr_model,
+        artifact_path="lr_model",
+        signature=signature,
+        input_example=input_example
+    )
+
+    model_uri = f"runs:/{mlflow.active_run().info.run_id}/lr_model"
+    mlflow.register_model(model_uri, model_name)
+```
+<img width="1631" height="592" alt="image" src="https://github.com/user-attachments/assets/41c3e5fe-198d-4fcc-afbf-9cb5c1954a52" />
+
+The model is now fully registered in the Databricks Model Registry with versioning, metadata, and test performance included.
