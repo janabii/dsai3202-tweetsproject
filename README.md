@@ -642,3 +642,14 @@ with mlflow.start_run(run_name="LR_Final_Test_Model"):
 <img width="1631" height="592" alt="image" src="https://github.com/user-attachments/assets/41c3e5fe-198d-4fcc-afbf-9cb5c1954a52" />
 
 The model is now fully registered in the Databricks Model Registry with versioning, metadata, and test performance included.
+
+### Final Conclusion 
+This project followed a complete end-to-end workflow using the medallion architecture and Databricks to build a scalable sentiment analysis pipeline for the Sentiment140 dataset. Starting from raw CSV ingestion, the data was cleaned, normalized, and enriched with engineered features such as TF-IDF vectors, VADER sentiment scores, lexical diversity, tweet-length metrics, and user activity statistics. These features formed a solid foundation for modeling.
+
+After training and comparing models, Logistic Regression consistently delivered the most stable performance across the train, validation, and test splits, making it the most suitable choice for this dataset. Its accuracy and F1 scores remained steady around ~0.62 on the test data, confirming that the features were well-constructed and that the model generalized effectively to unseen tweets.
+
+Finally, the selected model was deployed through Databricks MLflow and registered in the Model Registry with full metadata, signature, and input example, making it ready for future serving, retraining, or integration into downstream systems.
+
+The project demonstrates a full data engineering and machine learning lifecycle, from ingestion all the way to deployment, and provides a foundation that can be extended with more advanced NLP techniques in future iterations.
+
+I would like to acknowledge and Thank Dr. Oussama for this project and his efforts during the semester with his constant updates with the assignments and step by step walkthroughs, helping us when running through AWS and azure problems and more. It was a cocktail of enjoyment, frustration, and sleepless nights it was like playing dead souls but without smashing controllers, but most importantly, plenty of knowledge and understanding. 
